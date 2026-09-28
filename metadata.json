@@ -1,0 +1,6 @@
+{
+  "name": "Telebirr Sync",
+  "description": "SMS receiver and backend sync for Telebirr transactions",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
