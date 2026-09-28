@@ -44,7 +44,8 @@ object SmsInboxHelper {
      */
     suspend fun scanInboxForTelebirrTransactions(
         context: Context,
-        forceFullScan: Boolean = false
+        forceFullScan: Boolean = false,
+        enqueueSync: Boolean = true
     ): ScanResult = withContext(Dispatchers.IO) {
         val startTime = System.currentTimeMillis()
 
@@ -216,6 +217,10 @@ object SmsInboxHelper {
             }
         } catch (e: Exception) {
             Log.e(TAG, "Error querying SMS inbox", e)
+            if (maxProcessedDate > 0L || maxProcessedId > 0L) {
+                SettingsManager.saveScanCheckpoint(context, maxProcessedDate, maxProcessedId)
+            }
+            throw e
         }
 
         // Commit final checkpoint and scan timestamp
@@ -225,8 +230,8 @@ object SmsInboxHelper {
         val durationMs = System.currentTimeMillis() - startTime
         SettingsManager.saveLastScanTimestamp(context, System.currentTimeMillis())
 
-        if (newImportedCount > 0) {
-            SyncWorker.enqueueSync(context, replaceExisting = true)
+        if (newImportedCount > 0 && enqueueSync) {
+            SyncWorker.enqueueSync(context, replaceExisting = false)
         }
 
         Log.i(

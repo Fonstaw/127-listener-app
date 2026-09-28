@@ -21,23 +21,27 @@ class SyncWorker(
 
         var hasTemporaryFailure = false
         var processedCount = 0
+        val attemptedInThisWorkerRun = mutableSetOf<String>()
 
-        // Process all pending transactions; loop until no more pending work is found
+        // Process all eligible PENDING transactions; loop until no more eligible pending work is found
         while (true) {
             val pendingList = dao.getTransactionsByStatus(SyncStatus.PENDING)
-            val retryableFailedList = dao.getTransactionsByStatus(SyncStatus.FAILED)
-            val toProcess = (pendingList + retryableFailedList).distinctBy { it.transactionId }
+            // Filter to only unattempted transactions in this run to prevent endless loops
+            val toProcess = pendingList.filter { it.transactionId !in attemptedInThisWorkerRun }
 
             if (toProcess.isEmpty()) {
-                Log.d(TAG, "No pending or retryable transactions to sync.")
+                Log.d(TAG, "No more eligible PENDING transactions to sync in this pass.")
                 break
             }
 
             var processedInIteration = 0
             for (tx in toProcess) {
-                // Skip if already marked synced by a concurrent thread/action
+                attemptedInThisWorkerRun.add(tx.transactionId)
+
+                // Skip if no longer in PENDING state (e.g. synced or deleted concurrently)
                 val current = dao.getTransactionById(tx.transactionId)
-                if (current == null || current.syncStatus == SyncStatus.SYNCED) {
+                if (current == null || current.syncStatus != SyncStatus.PENDING) {
+                    Log.d(TAG, "Skipping txId=${tx.transactionId}: status is ${current?.syncStatus}")
                     continue
                 }
 
@@ -53,15 +57,17 @@ class SyncWorker(
                     is SyncResult.TransientError -> {
                         Log.w(TAG, "SyncWorker transient error for txId=${tx.transactionId}: ${result.message}")
                         hasTemporaryFailure = true
+                        // Stop further processing in this run; transient error indicates network/server unavailable
+                        break
                     }
                     is SyncResult.PermanentError -> {
-                        Log.e(TAG, "SyncWorker permanent error for txId=${tx.transactionId}: ${result.message}. Marked as FAILED (no retry).")
+                        Log.e(TAG, "SyncWorker permanent error for txId=${tx.transactionId}: ${result.message}. Marked as FAILED (no automatic retry).")
                     }
                 }
             }
 
-            // If nothing was processed in this pass or if we hit a temporary failure, stop the loop
-            if (processedInIteration == 0 || hasTemporaryFailure) {
+            // If we hit a temporary failure or didn't process any transactions in this pass, exit loop
+            if (hasTemporaryFailure || processedInIteration == 0) {
                 break
             }
         }
@@ -69,14 +75,15 @@ class SyncWorker(
         Log.i(TAG, "SyncWorker finished pass: processed=$processedCount, temporaryFailures=$hasTemporaryFailure")
 
         return if (hasTemporaryFailure) {
-            if (runAttemptCount < MAX_RETRIES) {
-                Log.w(TAG, "Enqueuing automatic retry with exponential backoff (attempt $runAttemptCount of $MAX_RETRIES)")
-                Result.retry()
-            } else {
-                Log.e(TAG, "Max retry attempts reached ($MAX_RETRIES). Transactions remain safely in database for manual or next network sync.")
-                Result.failure()
-            }
+            Log.w(TAG, "Transient failure encountered (runAttemptCount=$runAttemptCount). WorkManager will retry with exponential backoff.")
+            Result.retry()
         } else {
+            // Safety check: if a new pending transaction arrived at the end of the loop, schedule a follow-up
+            val unhandled = dao.getTransactionsByStatus(SyncStatus.PENDING).filter { it.transactionId !in attemptedInThisWorkerRun }
+            if (unhandled.isNotEmpty()) {
+                Log.d(TAG, "Found ${unhandled.size} newly arrived pending transactions, enqueuing follow-up sync.")
+                enqueueSync(applicationContext, replaceExisting = false)
+            }
             Result.success()
         }
     }
@@ -84,13 +91,13 @@ class SyncWorker(
     companion object {
         private const val TAG = "SyncWorker"
         const val UNIQUE_WORK_NAME = "telebirr_transaction_sync"
-        private const val MAX_RETRIES = 6
 
         /**
          * Enqueues durable synchronization work with WorkManager.
          * - Requires network connectivity
          * - Uses exponential backoff (starting at 15s)
-         * - Unique work policy ensures multiple rapid SMS messages coalesce cleanly
+         * - Unique work policy defaults to KEEP so multiple rapid SMS messages coalesce cleanly
+         *   without cancelling an actively running sync worker.
          */
         fun enqueueSync(context: Context, replaceExisting: Boolean = false) {
             val constraints = Constraints.Builder()

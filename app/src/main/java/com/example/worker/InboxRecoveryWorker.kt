@@ -14,7 +14,9 @@ import java.util.concurrent.TimeUnit
  * of the SMS inbox to catch any transactions that may have slipped past SMS_RECEIVED
  * broadcasts (e.g. while the phone was rebooting or under heavy system memory pressure).
  *
- * Runs at a sensible, non-aggressive interval (every 12 hours) with battery and network constraints.
+ * Runs locally on device without network constraints at a 12-hour interval.
+ * Transactions discovered are saved locally as PENDING and enqueued for SyncWorker,
+ * which handles network availability and backend synchronization.
  */
 class InboxRecoveryWorker(
     appContext: Context,
@@ -22,7 +24,7 @@ class InboxRecoveryWorker(
 ) : CoroutineWorker(appContext, workerParams) {
 
     override suspend fun doWork(): Result {
-        Log.d(TAG, "Starting periodic incremental SMS recovery scan...")
+        Log.d(TAG, "Starting periodic incremental SMS recovery scan (attempt: $runAttemptCount)...")
 
         if (ContextCompat.checkSelfPermission(applicationContext, Manifest.permission.READ_SMS)
             != PackageManager.PERMISSION_GRANTED) {
@@ -31,22 +33,26 @@ class InboxRecoveryWorker(
         }
 
         try {
-            // Incremental scan from stored checkpoint
+            // Incremental scan from stored checkpoint; enqueueSync=false to avoid duplicate enqueuing
             val result = SmsInboxHelper.scanInboxForTelebirrTransactions(
                 context = applicationContext,
-                forceFullScan = false
+                forceFullScan = false,
+                enqueueSync = false
             )
             Log.i(TAG, "Recovery scan complete: scanned=${result.totalScanned}, newCount=${result.newCount}")
 
             if (result.newCount > 0) {
-                // If any missed transactions were found and saved, trigger sync worker
-                SyncWorker.enqueueSync(applicationContext, replaceExisting = true)
+                // If any missed transactions were found and saved as PENDING, enqueue SyncWorker
+                SyncWorker.enqueueSync(applicationContext, replaceExisting = false)
             }
+            return Result.success()
+        } catch (e: SecurityException) {
+            Log.w(TAG, "READ_SMS permission missing or revoked during recovery scan, not retrying.", e)
+            return Result.success()
         } catch (e: Exception) {
-            Log.e(TAG, "Error during periodic recovery scan", e)
+            Log.e(TAG, "Error during periodic recovery scan (attempt: $runAttemptCount), requesting retry with backoff.", e)
+            return Result.retry()
         }
-
-        return Result.success()
     }
 
     companion object {
@@ -55,11 +61,11 @@ class InboxRecoveryWorker(
 
         /**
          * Schedules a 12-hour periodic recovery scan.
-         * Uses battery not low and network connected constraints to be friendly to battery.
+         * Runs locally on device without requiring network connectivity.
+         * Constrained only by battery not low to remain lightweight.
          */
         fun schedulePeriodicRecovery(context: Context) {
             val constraints = Constraints.Builder()
-                .setRequiredNetworkType(NetworkType.CONNECTED)
                 .setRequiresBatteryNotLow(true)
                 .build()
 
@@ -68,6 +74,11 @@ class InboxRecoveryWorker(
                 30, TimeUnit.MINUTES // 30-minute flex window
             )
                 .setConstraints(constraints)
+                .setBackoffCriteria(
+                    BackoffPolicy.EXPONENTIAL,
+                    15,
+                    TimeUnit.SECONDS
+                )
                 .addTag("telebirr_recovery")
                 .build()
 
@@ -76,7 +87,7 @@ class InboxRecoveryWorker(
                 ExistingPeriodicWorkPolicy.KEEP,
                 recoveryRequest
             )
-            Log.d(TAG, "Scheduled periodic recovery scan every 12 hours (policy=KEEP)")
+            Log.d(TAG, "Scheduled periodic recovery scan every 12 hours (policy=KEEP, batteryNotLow=true, local-only)")
         }
     }
 }

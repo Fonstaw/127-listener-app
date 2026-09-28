@@ -647,7 +647,7 @@ fun SettingsScreenContent(
                     )
                     Spacer(modifier = Modifier.width(8.dp))
                     Text(
-                        "Durable Sync Engine Active • 0% Idle Battery Drain",
+                        "Durable Sync Engine Active • Minimal idle activity",
                         style = MaterialTheme.typography.labelSmall.copy(fontWeight = FontWeight.SemiBold),
                         color = MaterialTheme.colorScheme.primary
                     )

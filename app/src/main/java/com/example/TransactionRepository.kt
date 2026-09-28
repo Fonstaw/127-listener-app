@@ -61,7 +61,7 @@ class TransactionRepository(
         val inserted = insertPendingTransaction(transaction)
         if (inserted) {
             // Trigger durable background synchronization
-            SyncWorker.enqueueSync(context, replaceExisting = true)
+            SyncWorker.enqueueSync(context, replaceExisting = false)
         }
         return inserted
     }
@@ -128,7 +128,7 @@ class TransactionRepository(
         } catch (e: Exception) {
             val msg = "Unexpected error during sync: ${e.message}"
             Log.e(TAG, "Sync ERROR: txId=${transaction.transactionId}, $msg", e)
-            transactionDao.updateSyncStatus(transaction.transactionId, SyncStatus.FAILED)
+            transactionDao.updateSyncStatus(transaction.transactionId, SyncStatus.PENDING)
             return@withContext SyncResult.TransientError(msg)
         }
     }

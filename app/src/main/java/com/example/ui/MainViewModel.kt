@@ -144,6 +144,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     forceFullScan = forceFullScan
                 )
                 onComplete(result)
+            } catch (e: Exception) {
+                android.util.Log.e("MainViewModel", "Error scanning SMS inbox", e)
             } finally {
                 _isScanningInbox.value = false
             }

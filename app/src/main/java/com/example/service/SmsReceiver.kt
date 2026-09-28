@@ -84,7 +84,7 @@ class SmsReceiver : BroadcastReceiver() {
 
                     if (isNew) {
                         Log.i(TAG, "Safely saved transaction ${transaction.transactionId}. Enqueuing durable sync...")
-                        SyncWorker.enqueueSync(appContext, replaceExisting = true)
+                        SyncWorker.enqueueSync(appContext, replaceExisting = false)
                     } else {
                         Log.d(TAG, "Transaction ${transaction.transactionId} was already persisted. Skipping sync enqueue.")
                     }
