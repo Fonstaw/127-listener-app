@@ -13,6 +13,7 @@ import com.example.data.Transaction
 import com.example.data.TransactionRepository
 import com.example.parser.SmsParser
 import com.example.security.SettingsManager
+import com.example.worker.SyncWorker
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 
@@ -190,8 +191,8 @@ object SmsInboxHelper {
                                 syncStatus = SyncStatus.PENDING
                             )
 
-                            // Save and sync new transaction
-                            val saved = repository.saveAndSyncTransaction(transaction)
+                            // Persist new pending transaction locally to Room
+                            val saved = repository.insertPendingTransaction(transaction)
                             if (saved) {
                                 existingIds.add(parsed.transactionId)
                                 newImportedCount++
@@ -223,6 +224,10 @@ object SmsInboxHelper {
         }
         val durationMs = System.currentTimeMillis() - startTime
         SettingsManager.saveLastScanTimestamp(context, System.currentTimeMillis())
+
+        if (newImportedCount > 0) {
+            SyncWorker.enqueueSync(context, replaceExisting = true)
+        }
 
         Log.i(
             TAG,

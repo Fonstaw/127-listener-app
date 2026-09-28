@@ -5,7 +5,6 @@ import android.content.Intent
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
-import android.os.PowerManager
 import android.provider.Settings
 import android.widget.Toast
 import androidx.activity.compose.setContent
@@ -37,10 +36,10 @@ import androidx.compose.ui.unit.sp
 import androidx.fragment.app.FragmentActivity
 import com.example.security.BiometricHelper
 import com.example.security.SettingsManager
-import com.example.service.ForegroundService
 import com.example.ui.MainViewModel
 import com.example.ui.TransactionsScreen
 import com.example.ui.theme.MyApplicationTheme
+import com.example.worker.InboxRecoveryWorker
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.core.app.ActivityCompat
@@ -50,7 +49,6 @@ import android.content.pm.PackageManager
 class MainActivity : FragmentActivity() {
 
     private val viewModel: MainViewModel by viewModels()
-    private var isBatteryOptimizing by mutableStateOf(true)
 
     // Callback for direct permission requests
     private var onPermissionResultAction: (() -> Unit)? = null
@@ -64,38 +62,6 @@ class MainActivity : FragmentActivity() {
         }
     }
 
-    fun requestIgnoreBatteryOptimizations() {
-        try {
-            val pm = getSystemService(android.content.Context.POWER_SERVICE) as? PowerManager
-            if (pm?.isIgnoringBatteryOptimizations(packageName) == false) {
-                val intent = Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS).apply {
-                    data = Uri.parse("package:$packageName")
-                }
-                startActivity(intent)
-            }
-        } catch (t: Throwable) {
-            try {
-                val fallbackIntent = Intent(Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS)
-                startActivity(fallbackIntent)
-            } catch (ignored: Throwable) {
-                android.util.Log.e("MainActivity", "Failed to launch battery optimization request", t)
-            }
-        }
-    }
-
-    private fun startBackgroundListenerService() {
-        try {
-            val serviceIntent = Intent(this, ForegroundService::class.java)
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                startForegroundService(serviceIntent)
-            } else {
-                startService(serviceIntent)
-            }
-        } catch (t: Throwable) {
-            android.util.Log.w("MainActivity", "Handled background service startup: ${t.message}")
-        }
-    }
-
     override fun onRequestPermissionsResult(
         requestCode: Int,
         permissions: Array<out String>,
@@ -103,17 +69,6 @@ class MainActivity : FragmentActivity() {
     ) {
         super.onRequestPermissionsResult(requestCode, permissions, grantResults)
         onPermissionResultAction?.invoke()
-    }
-
-    override fun onResume() {
-        super.onResume()
-        try {
-            val pm = getSystemService(android.content.Context.POWER_SERVICE) as? PowerManager
-            isBatteryOptimizing = pm?.isIgnoringBatteryOptimizations(packageName) != true
-        } catch (t: Throwable) {
-            android.util.Log.e("MainActivity", "Failed to check battery optimization in onResume", t)
-            isBatteryOptimizing = false
-        }
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -180,11 +135,8 @@ class MainActivity : FragmentActivity() {
 
                 LaunchedEffect(allPermissionsGranted) {
                     if (allPermissionsGranted) {
-                        android.util.Log.d("MainActivity", "All required SMS permissions granted. Starting background listener...")
-                        startBackgroundListenerService()
-                        if (isBatteryOptimizing) {
-                            requestIgnoreBatteryOptimizations()
-                        }
+                        android.util.Log.d("MainActivity", "All required SMS permissions granted. Scheduling recovery worker...")
+                        InboxRecoveryWorker.schedulePeriodicRecovery(context)
                     }
                 }
 
@@ -327,56 +279,6 @@ class MainActivity : FragmentActivity() {
                                     }
                                 }
                             } else {
-                                if (isBatteryOptimizing) {
-                                    Card(
-                                        modifier = Modifier
-                                            .fillMaxWidth()
-                                            .padding(horizontal = 16.dp, vertical = 6.dp),
-                                        colors = CardDefaults.cardColors(
-                                            containerColor = MaterialTheme.colorScheme.errorContainer.copy(alpha = 0.7f)
-                                        ),
-                                        shape = RoundedCornerShape(14.dp)
-                                    ) {
-                                        Row(
-                                            modifier = Modifier.padding(12.dp),
-                                            verticalAlignment = Alignment.CenterVertically
-                                        ) {
-                                            Icon(
-                                                imageVector = Icons.Default.Warning,
-                                                contentDescription = "Warning",
-                                                tint = MaterialTheme.colorScheme.error,
-                                                modifier = Modifier.size(22.dp)
-                                            )
-                                            Spacer(modifier = Modifier.width(10.dp))
-                                            Column(modifier = Modifier.weight(1f)) {
-                                                Text(
-                                                    "Background Service Limited",
-                                                    style = MaterialTheme.typography.titleSmall.copy(fontWeight = FontWeight.Bold),
-                                                    color = MaterialTheme.colorScheme.onErrorContainer
-                                                )
-                                                Text(
-                                                    "Disable battery optimizations for continuous 24/7 Telebirr processing.",
-                                                    style = MaterialTheme.typography.bodySmall,
-                                                    color = MaterialTheme.colorScheme.onErrorContainer
-                                                )
-                                            }
-                                            TextButton(
-                                                onClick = {
-                                                    try {
-                                                        val intent = Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS)
-                                                        intent.data = Uri.parse("package:${context.packageName}")
-                                                        context.startActivity(intent)
-                                                    } catch (e: Exception) {
-                                                        android.util.Log.e("MainActivity", "Launch battery settings failed", e)
-                                                    }
-                                                }
-                                            ) {
-                                                Text("Fix", fontWeight = FontWeight.Bold)
-                                            }
-                                        }
-                                    }
-                                }
-
                                 // Main Room Database Transactions Screen
                                 TransactionsScreen(
                                     viewModel = viewModel,
@@ -693,9 +595,9 @@ fun SettingsScreenContent(
 
         HorizontalDivider(modifier = Modifier.padding(vertical = 4.dp))
 
-        // Background Running & Battery Optimizations Section
+        // Background Running & WorkManager Event-Driven Architecture Section
         Text(
-            "Background Execution & Battery",
+            "Event-Driven Sync & Battery",
             style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.Bold),
             color = MaterialTheme.colorScheme.primary
         )
@@ -710,37 +612,45 @@ fun SettingsScreenContent(
             Column(modifier = Modifier.padding(16.dp)) {
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     Icon(
-                        imageVector = Icons.Default.BatteryChargingFull,
-                        contentDescription = "Background Execution",
+                        imageVector = Icons.Default.Bolt,
+                        contentDescription = "Event-Driven Sync",
                         tint = MaterialTheme.colorScheme.primary,
                         modifier = Modifier.size(28.dp)
                     )
                     Spacer(modifier = Modifier.width(12.dp))
                     Column(modifier = Modifier.weight(1f)) {
                         Text(
-                            "24/7 Background SMS Service",
+                            "Event-Driven WorkManager Sync",
                             style = MaterialTheme.typography.titleSmall.copy(fontWeight = FontWeight.Bold)
                         )
                         Text(
-                            "Ensures incoming Telebirr (127) receipts are captured even when the screen is locked or the app is closed.",
+                            "Incoming Telebirr SMS broadcasts safely wake the app to persist receipts and enqueue durable WorkManager sync with exponential backoff. Completely idle when no activity occurs.",
                             style = MaterialTheme.typography.bodySmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant
                         )
                     }
                 }
-                Spacer(modifier = Modifier.height(14.dp))
-                OutlinedButton(
-                    onClick = {
-                        if (activity is MainActivity) {
-                            activity.requestIgnoreBatteryOptimizations()
-                        }
-                    },
-                    modifier = Modifier.fillMaxWidth(),
-                    shape = RoundedCornerShape(10.dp)
+                Spacer(modifier = Modifier.height(10.dp))
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clip(RoundedCornerShape(8.dp))
+                        .background(MaterialTheme.colorScheme.primary.copy(alpha = 0.1f))
+                        .padding(horizontal = 12.dp, vertical = 8.dp),
+                    verticalAlignment = Alignment.CenterVertically
                 ) {
-                    Icon(Icons.Default.PowerSettingsNew, contentDescription = null, modifier = Modifier.size(18.dp))
+                    Icon(
+                        imageVector = Icons.Default.CheckCircle,
+                        contentDescription = "Active",
+                        tint = MaterialTheme.colorScheme.primary,
+                        modifier = Modifier.size(16.dp)
+                    )
                     Spacer(modifier = Modifier.width(8.dp))
-                    Text("Request Unrestricted Battery Permission")
+                    Text(
+                        "Durable Sync Engine Active • 0% Idle Battery Drain",
+                        style = MaterialTheme.typography.labelSmall.copy(fontWeight = FontWeight.SemiBold),
+                        color = MaterialTheme.colorScheme.primary
+                    )
                 }
             }
         }

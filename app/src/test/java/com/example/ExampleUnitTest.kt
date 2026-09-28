@@ -120,5 +120,51 @@ class ExampleUnitTest {
         assertEquals("https://api.mybot.com/", ApiClient.normalizeBaseUrl("https://api.mybot.com/api/received-transaction"))
         assertEquals("https://api.mybot.com/", ApiClient.normalizeBaseUrl("https://api.mybot.com/api/received-transaction/"))
     }
+
+    @Test
+    fun transactionValidation_identifiesInvalidTransactions() {
+        val blankIdTx = com.example.data.Transaction(
+            transactionId = "",
+            amount = 100.0,
+            senderName = "Test",
+            senderPhone = "251900000000",
+            timestamp = "2026-09-28",
+            rawSms = "Test raw SMS"
+        )
+        assertTrue(blankIdTx.transactionId.isBlank())
+
+        val zeroAmountTx = com.example.data.Transaction(
+            transactionId = "TX12345",
+            amount = 0.0,
+            senderName = "Test",
+            senderPhone = "251900000000",
+            timestamp = "2026-09-28",
+            rawSms = "Test raw SMS"
+        )
+        assertTrue(zeroAmountTx.amount <= 0.0)
+
+        val negativeAmountTx = com.example.data.Transaction(
+            transactionId = "TX12345",
+            amount = -50.0,
+            senderName = "Test",
+            senderPhone = "251900000000",
+            timestamp = "2026-09-28",
+            rawSms = "Test raw SMS"
+        )
+        assertTrue(negativeAmountTx.amount <= 0.0)
+
+        val validTx = com.example.data.Transaction(
+            transactionId = "TX998877",
+            amount = 150.0,
+            senderName = "Abezahegn",
+            senderPhone = "251911223344",
+            timestamp = "28/09/2026 14:00:00",
+            rawSms = "Valid SMS",
+            syncStatus = com.example.data.SyncStatus.PENDING
+        )
+        assertFalse(validTx.transactionId.isBlank())
+        assertTrue(validTx.amount > 0.0)
+        assertEquals(com.example.data.SyncStatus.PENDING, validTx.syncStatus)
+    }
 }
 

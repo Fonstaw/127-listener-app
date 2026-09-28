@@ -10,13 +10,26 @@ import com.example.data.SyncStatus
 import com.example.data.Transaction
 import com.example.data.TransactionRepository
 import com.example.parser.SmsParser
+import com.example.worker.SyncWorker
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 
+/**
+ * Event-driven BroadcastReceiver for SMS_RECEIVED intents.
+ * 
+ * Flow:
+ * SMS_RECEIVED
+ * -> Quick parse & validate
+ * -> Safely persist to Room (PENDING) using goAsync()
+ * -> Enqueue durable WorkManager sync
+ * -> pendingResult.finish()
+ * 
+ * Never makes direct network calls.
+ * Never keeps an always-on service alive.
+ * Dormant when no SMS arrives.
+ */
 class SmsReceiver : BroadcastReceiver() {
-
-    private val scope = CoroutineScope(Dispatchers.IO)
 
     override fun onReceive(context: Context, intent: Intent) {
         val action = intent.action
@@ -36,40 +49,61 @@ class SmsReceiver : BroadcastReceiver() {
             }
             val body = fullBodyBuilder.toString()
 
-            Log.d("SmsReceiver", "Incoming SMS broadcast from sender: [$sender]")
+            Log.d(TAG, "Received incoming SMS broadcast from: [$sender]")
 
-            if (SmsParser.isLikelyTelebirrMessage(sender, body)) {
-                Log.d("SmsReceiver", "Valid Telebirr (127) SMS detected. Parsing content...")
-                val parsedData = SmsParser.parseTelebirrSms(body)
+            if (!SmsParser.isLikelyTelebirrMessage(sender, body)) {
+                // Not a Telebirr transaction receipt; ignore without waking background threads
+                return
+            }
 
-                if (parsedData != null) {
-                    val transaction = Transaction(
-                        transactionId = parsedData.transactionId,
-                        amount = parsedData.amount,
-                        senderName = parsedData.senderName,
-                        senderPhone = parsedData.senderPhone,
-                        timestamp = parsedData.timestamp,
-                        rawSms = body,
-                        syncStatus = SyncStatus.PENDING
-                    )
+            val parsedData = SmsParser.parseTelebirrSms(body)
+            if (parsedData == null) {
+                Log.w(TAG, "Received SMS from $sender but failed to parse transaction fields.")
+                return
+            }
 
-                    val dao = AppDatabase.getDatabase(context.applicationContext).transactionDao()
-                    val repo = TransactionRepository(context.applicationContext, dao)
+            val transaction = Transaction(
+                transactionId = parsedData.transactionId,
+                amount = parsedData.amount,
+                senderName = parsedData.senderName,
+                senderPhone = parsedData.senderPhone,
+                timestamp = parsedData.timestamp,
+                rawSms = body,
+                syncStatus = SyncStatus.PENDING
+            )
 
-                    scope.launch {
-                        val isNew = repo.saveAndSyncTransaction(transaction)
-                        if (isNew) {
-                            Log.d("SmsReceiver", "Successfully processed & queued new transaction ${transaction.transactionId}")
-                        } else {
-                            Log.d("SmsReceiver", "Ignored duplicate transaction ${transaction.transactionId}")
-                        }
+            // Use goAsync() for the brief database write and WorkManager enqueue
+            val pendingResult = goAsync()
+            val appContext = context.applicationContext
+
+            CoroutineScope(Dispatchers.IO).launch {
+                try {
+                    val dao = AppDatabase.getDatabase(appContext).transactionDao()
+                    val repo = TransactionRepository(appContext, dao)
+                    val isNew = repo.insertPendingTransaction(transaction)
+
+                    if (isNew) {
+                        Log.i(TAG, "Safely saved transaction ${transaction.transactionId}. Enqueuing durable sync...")
+                        SyncWorker.enqueueSync(appContext, replaceExisting = true)
+                    } else {
+                        Log.d(TAG, "Transaction ${transaction.transactionId} was already persisted. Skipping sync enqueue.")
                     }
-                } else {
-                    Log.w("SmsReceiver", "Failed to extract required fields from 127 SMS (sender: $sender, length: ${body.length})")
+                } catch (t: Throwable) {
+                    Log.e(TAG, "Error storing transaction from SMS_RECEIVED", t)
+                } finally {
+                    try {
+                        pendingResult.finish()
+                    } catch (finishErr: Throwable) {
+                        Log.e(TAG, "Error finishing pendingResult", finishErr)
+                    }
                 }
             }
         } catch (e: Exception) {
-            Log.e("SmsReceiver", "Error processing SMS broadcast", e)
+            Log.e(TAG, "Error in onReceive handling SMS", e)
         }
+    }
+
+    companion object {
+        private const val TAG = "SmsReceiver"
     }
 }
